@@ -1,9 +1,9 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import {
-    AppointmentStatus,
-    Prisma,
-    QueueStatus,
-    StaffAvailability,
+  AppointmentStatus,
+  Prisma,
+  QueueStatus,
+  StaffAvailability,
 } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 

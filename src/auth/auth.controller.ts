@@ -43,6 +43,7 @@ export class AuthController {
     return sendResponse('User registered successfully', {
       user: result.user,
       accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
     });
   }
 
@@ -58,6 +59,7 @@ export class AuthController {
     return sendResponse('Login successful', {
       user: result.user,
       accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
     });
   }
 

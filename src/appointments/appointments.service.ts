@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -19,7 +20,56 @@ import { UpdateAppointmentDto } from './dto/update-appointment.dto';
 export class AppointmentsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private async checkConflict(
+  /**
+   * Use Asia/Dhaka boundaries by default (UTC+6 => 360 minutes).
+   * Override with env if you want: TZ_OFFSET_MINUTES=360
+   */
+  private readonly tzOffsetMinutes = Number(
+    process.env.TZ_OFFSET_MINUTES ?? 360,
+  );
+
+  private getDayRangeUtcFromInstant(date: Date) {
+    const offsetMs = this.tzOffsetMinutes * 60_000;
+
+    // Convert instant -> "local" by adding offset, then compute local date parts using UTC getters
+    const localMs = date.getTime() + offsetMs;
+    const local = new Date(localMs);
+
+    const y = local.getUTCFullYear();
+    const m = local.getUTCMonth();
+    const d = local.getUTCDate();
+
+    const startLocalMs = Date.UTC(y, m, d, 0, 0, 0, 0);
+    const endLocalMs = Date.UTC(y, m, d + 1, 0, 0, 0, 0);
+
+    // Convert local midnight back to UTC instants
+    return {
+      startUtc: new Date(startLocalMs - offsetMs),
+      endUtc: new Date(endLocalMs - offsetMs),
+    };
+  }
+
+  private getDayRangeUtcFromLocalDateString(dateStr: string) {
+    // dateStr expected: YYYY-MM-DD
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+    if (!m)
+      throw new BadRequestException('Invalid date format. Use YYYY-MM-DD');
+
+    const year = Number(m[1]);
+    const month = Number(m[2]) - 1;
+    const day = Number(m[3]);
+
+    const offsetMs = this.tzOffsetMinutes * 60_000;
+    const startLocalMs = Date.UTC(year, month, day, 0, 0, 0, 0);
+    const endLocalMs = Date.UTC(year, month, day + 1, 0, 0, 0, 0);
+
+    return {
+      startUtc: new Date(startLocalMs - offsetMs),
+      endUtc: new Date(endLocalMs - offsetMs),
+    };
+  }
+
+  private async hasOverlapConflict(
     staffId: string,
     startAt: Date,
     endAt: Date,
@@ -29,55 +79,46 @@ export class AppointmentsService {
       where: {
         staffId,
         status: { not: AppointmentStatus.CANCELLED },
-        id: excludeAppointmentId ? { not: excludeAppointmentId } : undefined,
-        AND: [
-          { startAt: { lt: endAt } }, // Existing starts before new ends
-          { endAt: { gt: startAt } }, // Existing ends after new starts
-        ],
+        ...(excludeAppointmentId ? { id: { not: excludeAppointmentId } } : {}),
+        AND: [{ startAt: { lt: endAt } }, { endAt: { gt: startAt } }],
       },
+      select: { id: true },
     });
 
     return !!existing;
   }
 
-  private async checkDailyCapacity(
+  private async getDailyCount(
     staffId: string,
-    date: Date,
-    capacity: number,
-  ): Promise<boolean> {
-    const startOfDay = new Date(date);
-    startOfDay.setUTCHours(0, 0, 0, 0);
+    dayInstant: Date,
+    excludeAppointmentId?: string,
+  ): Promise<number> {
+    const { startUtc, endUtc } = this.getDayRangeUtcFromInstant(dayInstant);
 
-    const endOfDay = new Date(date);
-    endOfDay.setUTCHours(23, 59, 59, 999);
-
-    const count = await this.prisma.appointment.count({
+    return this.prisma.appointment.count({
       where: {
         staffId,
         status: { not: AppointmentStatus.CANCELLED },
-        startAt: {
-          gte: startOfDay,
-          lte: endOfDay,
-        },
+        ...(excludeAppointmentId ? { id: { not: excludeAppointmentId } } : {}),
+        startAt: { gte: startUtc, lt: endUtc },
       },
     });
-
-    return count >= capacity;
   }
 
   async getEligibleStaff(dto: EligibleStaffDto) {
     const service = await this.prisma.service.findUnique({
       where: { id: dto.serviceId },
     });
-
-    if (!service) {
-      throw new NotFoundException('Service not found');
-    }
+    if (!service) throw new NotFoundException('Service not found');
 
     const startAt = new Date(dto.startAt);
-    const endAt = new Date(startAt.getTime() + service.durationMinutes * 60000);
+    if (Number.isNaN(startAt.getTime())) {
+      throw new BadRequestException('Invalid startAt');
+    }
+    const endAt = new Date(
+      startAt.getTime() + service.durationMinutes * 60_000,
+    );
 
-    // 1. Fetch candidate staff
     const candidateStaff = await this.prisma.staff.findMany({
       where: { type: service.requiredStaffType },
       orderBy: { name: 'asc' },
@@ -92,30 +133,26 @@ export class AppointmentsService {
       };
     }
 
-    const staffIds = candidateStaff.map((s) => s.id);
+    const staffIds = candidateStaff.map((staffMember) => staffMember.id);
+    const { startUtc, endUtc } = this.getDayRangeUtcFromInstant(startAt);
 
-    // 2. Fetch today's appointment counts for all candidates
-    const startOfDay = new Date(startAt);
-    startOfDay.setUTCHours(0, 0, 0, 0);
-    const endOfDay = new Date(startAt);
-    endOfDay.setUTCHours(23, 59, 59, 999);
-
+    // Counts grouped (no N+1)
     const todayCounts = await this.prisma.appointment.groupBy({
       by: ['staffId'],
       where: {
         staffId: { in: staffIds },
         status: { not: AppointmentStatus.CANCELLED },
-        startAt: { gte: startOfDay, lte: endOfDay },
+        startAt: { gte: startUtc, lt: endUtc },
       },
-      _count: { staffId: true },
+      _count: { _all: true },
     });
 
     const countMap = new Map<string, number>();
-    todayCounts.forEach((c) => {
-      if (c.staffId) countMap.set(c.staffId, c._count.staffId);
-    });
+    for (const row of todayCounts) {
+      if (row.staffId) countMap.set(row.staffId, row._count._all);
+    }
 
-    // 3. Fetch conflicting appointments for all candidates
+    // Conflicts in one query (no N+1)
     const conflicts = await this.prisma.appointment.findMany({
       where: {
         staffId: { in: staffIds },
@@ -126,52 +163,45 @@ export class AppointmentsService {
     });
 
     const conflictSet = new Set<string>();
-    conflicts.forEach((c) => {
-      if (c.staffId) conflictSet.add(c.staffId);
-    });
+    for (const conflict of conflicts)
+      if (conflict.staffId) conflictSet.add(conflict.staffId);
 
-    // 4. Compute eligibility and build response
-    const staffResult = candidateStaff.map((staff) => {
-      const todayCount = countMap.get(staff.id) || 0;
-      const hasConflict = conflictSet.has(staff.id);
-      const blockedReasons: string[] = [];
+    const staffResult = candidateStaff
+      .map((staff) => {
+        const todayCount = countMap.get(staff.id) ?? 0;
+        const hasConflict = conflictSet.has(staff.id);
 
-      if (staff.availability !== StaffAvailability.AVAILABLE) {
-        blockedReasons.push('ON_LEAVE');
-      }
-      if (todayCount >= staff.dailyCapacity) {
-        blockedReasons.push('CAPACITY_FULL');
-      }
-      if (hasConflict) {
-        blockedReasons.push('TIME_CONFLICT');
-      }
+        const blockedReasons: string[] = [];
+        if (staff.availability !== StaffAvailability.AVAILABLE) {
+          blockedReasons.push('ON_LEAVE');
+        }
+        if (todayCount >= staff.dailyCapacity) {
+          blockedReasons.push('CAPACITY_FULL');
+        }
+        if (hasConflict) {
+          blockedReasons.push('TIME_CONFLICT');
+        }
 
-      const isEligible = blockedReasons.length === 0;
+        const isEligible = blockedReasons.length === 0;
 
-      return {
-        id: staff.id,
-        name: staff.name,
-        type: staff.type,
-        availability: staff.availability,
-        todayCount,
-        dailyCapacity: staff.dailyCapacity,
-        loadLabel: `${todayCount}/${staff.dailyCapacity}`,
-        hasConflict,
-        isEligible,
-        blockedReasons,
-      };
-    });
-
-    // 5. Sort: Eligible first, then by load, then by name
-    staffResult.sort((a, b) => {
-      if (a.isEligible !== b.isEligible) {
-        return a.isEligible ? -1 : 1; // Eligible first
-      }
-      if (a.todayCount !== b.todayCount) {
-        return a.todayCount - b.todayCount; // Lower load first
-      }
-      return a.name.localeCompare(b.name);
-    });
+        return {
+          id: staff.id,
+          name: staff.name,
+          type: staff.type,
+          availability: staff.availability,
+          todayCount,
+          dailyCapacity: staff.dailyCapacity,
+          loadLabel: `${todayCount}/${staff.dailyCapacity}`,
+          hasConflict,
+          isEligible,
+          blockedReasons,
+        };
+      })
+      .sort((a, b) => {
+        if (a.isEligible !== b.isEligible) return a.isEligible ? -1 : 1;
+        if (a.todayCount !== b.todayCount) return a.todayCount - b.todayCount;
+        return a.name.localeCompare(b.name);
+      });
 
     return {
       service,
@@ -185,61 +215,78 @@ export class AppointmentsService {
     const service = await this.prisma.service.findUnique({
       where: { id: dto.serviceId },
     });
-
-    if (!service) {
-      throw new NotFoundException('Service not found');
-    }
+    if (!service) throw new NotFoundException('Service not found');
 
     const startAt = new Date(dto.startAt);
-    const endAt = new Date(startAt.getTime() + service.durationMinutes * 60000);
+    if (Number.isNaN(startAt.getTime())) {
+      throw new BadRequestException('Invalid startAt');
+    }
+    const endAt = new Date(
+      startAt.getTime() + service.durationMinutes * 60_000,
+    );
 
-    const eligibleStaff = await this.prisma.staff.findMany({
+    // Candidate staff (availability-filtered)
+    const candidates = await this.prisma.staff.findMany({
       where: {
         type: service.requiredStaffType,
         availability: StaffAvailability.AVAILABLE,
       },
+      select: { id: true, name: true, dailyCapacity: true },
     });
 
     let assignedStaffId: string | null = null;
     let appointmentStatus: AppointmentStatus = AppointmentStatus.WAITING;
 
-    const staffCandidates: { staff: any; load: number }[] = [];
+    if (candidates.length > 0) {
+      const staffIds = candidates.map((staff) => staff.id);
+      const { startUtc, endUtc } = this.getDayRangeUtcFromInstant(startAt);
 
-    for (const staff of eligibleStaff) {
-      const isFull = await this.checkDailyCapacity(
-        staff.id,
-        startAt,
-        staff.dailyCapacity,
-      );
-      if (isFull) continue;
-
-      const hasConflict = await this.checkConflict(staff.id, startAt, endAt);
-      if (hasConflict) continue;
-
-      const startOfDay = new Date(startAt);
-      startOfDay.setUTCHours(0, 0, 0, 0);
-      const endOfDay = new Date(startAt);
-      endOfDay.setUTCHours(23, 59, 59, 999);
-
-      const load = await this.prisma.appointment.count({
+      const counts = await this.prisma.appointment.groupBy({
+        by: ['staffId'],
         where: {
-          staffId: staff.id,
+          staffId: { in: staffIds },
           status: { not: AppointmentStatus.CANCELLED },
-          startAt: { gte: startOfDay, lte: endOfDay },
+          startAt: { gte: startUtc, lt: endUtc },
         },
+        _count: { _all: true },
       });
 
-      staffCandidates.push({ staff, load });
+      const countMap = new Map<string, number>();
+      for (const row of counts) {
+        if (row.staffId) countMap.set(row.staffId, row._count._all);
+      }
+
+      const conflicts = await this.prisma.appointment.findMany({
+        where: {
+          staffId: { in: staffIds },
+          status: { not: AppointmentStatus.CANCELLED },
+          AND: [{ startAt: { lt: endAt } }, { endAt: { gt: startAt } }],
+        },
+        select: { staffId: true },
+      });
+
+      const conflictSet = new Set<string>();
+      for (const c of conflicts) if (c.staffId) conflictSet.add(c.staffId);
+
+      const eligible = candidates
+        .map((staff) => ({
+          staff: staff,
+          load: countMap.get(staff.id) ?? 0,
+          hasConflict: conflictSet.has(staff.id),
+        }))
+        .filter((x) => x.load < x.staff.dailyCapacity && !x.hasConflict)
+        .sort(
+          (candidateA, candidateB) =>
+            candidateA.load - candidateB.load ||
+            candidateA.staff.name.localeCompare(candidateB.staff.name),
+        );
+
+      if (eligible.length > 0) {
+        assignedStaffId = eligible[0].staff.id;
+        appointmentStatus = AppointmentStatus.SCHEDULED;
+      }
     }
 
-    staffCandidates.sort((a, b) => a.load - b.load);
-
-    if (staffCandidates.length > 0) {
-      assignedStaffId = staffCandidates[0].staff.id;
-      appointmentStatus = AppointmentStatus.SCHEDULED;
-    }
-
-    // Use transaction to create appointment and queue item if needed
     return this.prisma.$transaction(async (tx) => {
       const appointment = await tx.appointment.create({
         data: {
@@ -252,18 +299,12 @@ export class AppointmentsService {
           endAt,
           status: appointmentStatus,
         },
-        include: {
-          service: true,
-          staff: true,
-        },
+        include: { service: true, staff: true },
       });
 
       if (appointmentStatus === AppointmentStatus.WAITING) {
         await tx.queueItem.create({
-          data: {
-            appointmentId: appointment.id,
-            status: QueueStatus.ACTIVE,
-          },
+          data: { appointmentId: appointment.id, status: QueueStatus.ACTIVE },
         });
       }
 
@@ -281,25 +322,12 @@ export class AppointmentsService {
     const where: Prisma.AppointmentWhereInput = {};
 
     if (date) {
-      const searchDate = new Date(date);
-      const startOfDay = new Date(searchDate);
-      startOfDay.setUTCHours(0, 0, 0, 0);
-      const endOfDay = new Date(searchDate);
-      endOfDay.setUTCHours(23, 59, 59, 999);
-
-      where.startAt = {
-        gte: startOfDay,
-        lte: endOfDay,
-      };
+      const { startUtc, endUtc } = this.getDayRangeUtcFromLocalDateString(date);
+      where.startAt = { gte: startUtc, lt: endUtc };
     }
 
-    if (staffId) {
-      where.staffId = staffId;
-    }
-
-    if (status) {
-      where.status = status;
-    }
+    if (staffId) where.staffId = staffId;
+    if (status) where.status = status;
 
     const totalItems = await this.prisma.appointment.count({ where });
     const { skip, take, meta } = getPagination(page, limit, totalItems);
@@ -308,10 +336,7 @@ export class AppointmentsService {
       where,
       skip,
       take,
-      include: {
-        service: true,
-        staff: true,
-      },
+      include: { service: true, staff: true },
       orderBy: { startAt: 'asc' },
     });
 
@@ -321,16 +346,9 @@ export class AppointmentsService {
   async findOne(id: string) {
     const appointment = await this.prisma.appointment.findUnique({
       where: { id },
-      include: {
-        service: true,
-        staff: true,
-      },
+      include: { service: true, staff: true },
     });
-
-    if (!appointment) {
-      throw new NotFoundException('Appointment not found');
-    }
-
+    if (!appointment) throw new NotFoundException('Appointment not found');
     return appointment;
   }
 
@@ -339,71 +357,112 @@ export class AppointmentsService {
       where: { id },
       include: { service: true, staff: true, queueItem: true },
     });
+    if (!appointment) throw new NotFoundException('Appointment not found');
 
-    if (!appointment) {
-      throw new NotFoundException('Appointment not found');
-    }
-
-    let startAt = appointment.startAt;
-    let endAt = appointment.endAt;
-    let serviceId = appointment.serviceId;
-    let duration = appointment.service.durationMinutes;
+    // Compute next startAt/service/duration/endAt
+    let nextStartAt = appointment.startAt;
+    let nextServiceId = appointment.serviceId;
+    let nextDuration = appointment.service.durationMinutes;
 
     if (dto.serviceId) {
-      const service = await this.prisma.service.findUnique({
+      const svc = await this.prisma.service.findUnique({
         where: { id: dto.serviceId },
       });
-      if (!service) throw new NotFoundException('Service not found');
-      serviceId = service.id;
-      duration = service.durationMinutes;
+      if (!svc) throw new NotFoundException('Service not found');
+      nextServiceId = svc.id;
+      nextDuration = svc.durationMinutes;
     }
 
     if (dto.startAt) {
-      startAt = new Date(dto.startAt);
+      nextStartAt = new Date(dto.startAt);
+      if (Number.isNaN(nextStartAt.getTime())) {
+        throw new BadRequestException('Invalid startAt');
+      }
     }
 
-    if (dto.startAt || dto.serviceId) {
-      endAt = new Date(startAt.getTime() + duration * 60000);
-    }
+    const nextEndAt =
+      dto.startAt || dto.serviceId
+        ? new Date(nextStartAt.getTime() + nextDuration * 60_000)
+        : appointment.endAt;
 
-    const staffId =
+    // Determine next staffId and status
+    const nextStaffId =
       dto.staffId !== undefined ? dto.staffId : appointment.staffId;
-    let status = dto.status || appointment.status;
+
+    let nextStatus = dto.status ?? appointment.status;
+
+    // Invariants
+    if (nextStatus === AppointmentStatus.WAITING) {
+      // WAITING must be unassigned
+      if (nextStaffId !== null) {
+        // force consistent state
+        // (or throw if you prefer strict)
+        // throw new BadRequestException('WAITING appointments cannot have staff assigned');
+      }
+    }
 
     if (
-      staffId &&
-      (staffId !== appointment.staffId || dto.startAt || dto.serviceId)
+      [
+        AppointmentStatus.SCHEDULED,
+        AppointmentStatus.COMPLETED,
+        AppointmentStatus.NO_SHOW,
+      ].some((status) => status === nextStatus) &&
+      nextStaffId === null
+    ) {
+      throw new BadRequestException(
+        `${nextStatus} appointments must have an assigned staff member.`,
+      );
+    }
+
+    // If staff/time/service changed and the appointment is not cancelled/waiting, validate assignment
+    const assignmentChanged =
+      dto.staffId !== undefined || !!dto.startAt || !!dto.serviceId;
+
+    if (
+      assignmentChanged &&
+      nextStaffId &&
+      nextStatus !== AppointmentStatus.CANCELLED &&
+      nextStatus !== AppointmentStatus.WAITING
     ) {
       const staff = await this.prisma.staff.findUnique({
-        where: { id: staffId },
+        where: { id: nextStaffId },
       });
       if (!staff) throw new NotFoundException('Staff not found');
 
-      if (staffId !== appointment.staffId) {
-        const isFull = await this.checkDailyCapacity(
-          staffId,
-          startAt,
-          staff.dailyCapacity,
-        );
-        if (isFull) {
-          throw new ConflictException(
-            `${staff.name} has reached daily capacity.`,
-          );
-        }
+      if (staff.availability !== StaffAvailability.AVAILABLE) {
+        throw new ConflictException(`${staff.name} is currently on leave.`);
       }
 
-      const hasConflict = await this.checkConflict(staffId, startAt, endAt, id);
+      // Capacity check (exclude this appointment)
+      const dailyCount = await this.getDailyCount(nextStaffId, nextStartAt, id);
+      if (dailyCount >= staff.dailyCapacity) {
+        throw new ConflictException(
+          `${staff.name} already has ${staff.dailyCapacity} appointments today.`,
+        );
+      }
 
+      // Conflict overlap check (exclude this appointment)
+      const hasConflict = await this.hasOverlapConflict(
+        nextStaffId,
+        nextStartAt,
+        nextEndAt,
+        id,
+      );
       if (hasConflict) {
         throw new ConflictException(
-          `Staff member already has an appointment at this time.`,
+          `This staff member already has an appointment at this time.`,
         );
       }
     }
 
-    if (staffId === null && !dto.status) {
-      status = AppointmentStatus.WAITING;
+    // If staffId explicitly set to null and status not provided, default to WAITING
+    if (dto.staffId === null && dto.status === undefined) {
+      nextStatus = AppointmentStatus.WAITING;
     }
+
+    // Ensure WAITING implies staffId null (strong consistency)
+    const finalStaffId =
+      nextStatus === AppointmentStatus.WAITING ? null : nextStaffId;
 
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.appointment.update({
@@ -412,25 +471,21 @@ export class AppointmentsService {
           customerName: dto.customerName,
           customerEmail: dto.customerEmail,
           customerPhone: dto.customerPhone,
-          serviceId,
-          staffId,
-          startAt,
-          endAt,
-          status,
+          serviceId: nextServiceId,
+          staffId: finalStaffId,
+          startAt: nextStartAt,
+          endAt: nextEndAt,
+          status: nextStatus,
         },
-        include: {
-          service: true,
-          staff: true,
-        },
+        include: { service: true, staff: true },
       });
 
-      // Handle QueueItem updates
-      if (status === AppointmentStatus.WAITING) {
-        // Ensure QueueItem exists and is ACTIVE
-        const existingQueue = await tx.queueItem.findUnique({
-          where: { appointmentId: id },
-        });
+      // Queue state sync
+      const existingQueue = await tx.queueItem.findUnique({
+        where: { appointmentId: id },
+      });
 
+      if (nextStatus === AppointmentStatus.WAITING) {
         if (existingQueue) {
           if (existingQueue.status !== QueueStatus.ACTIVE) {
             await tx.queueItem.update({
@@ -440,30 +495,23 @@ export class AppointmentsService {
           }
         } else {
           await tx.queueItem.create({
-            data: {
-              appointmentId: id,
-              status: QueueStatus.ACTIVE,
-            },
+            data: { appointmentId: id, status: QueueStatus.ACTIVE },
           });
         }
       } else if (
-        status === AppointmentStatus.SCHEDULED ||
-        status === AppointmentStatus.COMPLETED
+        [
+          AppointmentStatus.SCHEDULED,
+          AppointmentStatus.COMPLETED,
+          AppointmentStatus.NO_SHOW,
+        ].some((status) => status === nextStatus)
       ) {
-        // If assigned/completed, mark queue as ASSIGNED
-        const existingQueue = await tx.queueItem.findUnique({
-          where: { appointmentId: id },
-        });
         if (existingQueue && existingQueue.status === QueueStatus.ACTIVE) {
           await tx.queueItem.update({
             where: { appointmentId: id },
             data: { status: QueueStatus.ASSIGNED },
           });
         }
-      } else if (status === AppointmentStatus.CANCELLED) {
-        const existingQueue = await tx.queueItem.findUnique({
-          where: { appointmentId: id },
-        });
+      } else if (nextStatus === AppointmentStatus.CANCELLED) {
         if (existingQueue && existingQueue.status === QueueStatus.ACTIVE) {
           await tx.queueItem.update({
             where: { appointmentId: id },
@@ -480,10 +528,7 @@ export class AppointmentsService {
     const appointment = await this.prisma.appointment.findUnique({
       where: { id },
     });
-
-    if (!appointment) {
-      throw new NotFoundException('Appointment not found');
-    }
+    if (!appointment) throw new NotFoundException('Appointment not found');
 
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.appointment.update({
@@ -492,7 +537,6 @@ export class AppointmentsService {
         include: { service: true, staff: true },
       });
 
-      // Update queue item if exists
       const queueItem = await tx.queueItem.findUnique({
         where: { appointmentId: id },
       });

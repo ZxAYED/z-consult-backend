@@ -5,7 +5,6 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
-  IsUUID,
   Length,
 } from 'class-validator';
 
@@ -27,7 +26,7 @@ export class CreateAppointmentDto {
   customerPhone?: string;
 
   @ApiProperty({ example: 'service-uuid-123' })
-  @IsUUID()
+  @IsString()
   @IsNotEmpty()
   serviceId!: string;
 
