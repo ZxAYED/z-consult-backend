@@ -8,6 +8,10 @@ import { AuthGuard } from './common/guards/auth/auth.guard';
 import { PrismaModule } from './prisma/prisma.module';
 import { StaffModule } from './staff/staff.module';
 import { ServicesModule } from './services/services.module';
+import { AppointmentsModule } from './appointments/appointments.module';
+import { DashboardModule } from './dashboard/dashboard.module';
+import { ActivityLogModule } from './activity-log/activity-log.module';
+import { QueueModule } from './queue/queue.module';
 
 @Module({
   imports: [
@@ -40,6 +44,10 @@ import { ServicesModule } from './services/services.module';
     AuthModule,
     StaffModule,
     ServicesModule,
+    AppointmentsModule,
+    DashboardModule,
+    ActivityLogModule,
+    QueueModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: AuthGuard }],

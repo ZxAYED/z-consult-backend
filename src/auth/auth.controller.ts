@@ -11,12 +11,10 @@ import { ApiBearerAuth, ApiBody, ApiTags } from '@nestjs/swagger';
 import { User } from '@prisma/client';
 import type { Request, Response } from 'express';
 import { Public } from 'src/common/decorator/rolesDecorator';
+import { sendResponse } from 'src/utils/sendResponse';
 import { AuthService } from './auth.service';
-import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
-import { ResetPasswordDto } from './dto/reset-password.dto';
 import { SignupDto } from './dto/signup.dto';
-import { VerifyOtpDto } from './dto/verify-otp.dto';
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -42,10 +40,10 @@ export class AuthController {
   ) {
     const result = await this.auth.signup(dto);
     this.setRefreshCookie(res, result.refreshToken);
-    return {
+    return sendResponse('User registered successfully', {
       user: result.user,
       accessToken: result.accessToken,
-    };
+    });
   }
 
   @Public()
@@ -57,10 +55,10 @@ export class AuthController {
   ) {
     const result = await this.auth.login(dto);
     this.setRefreshCookie(res, result.refreshToken);
-    return {
+    return sendResponse('Login successful', {
       user: result.user,
       accessToken: result.accessToken,
-    };
+    });
   }
 
   @Public()
@@ -77,51 +75,15 @@ export class AuthController {
     const result = await this.auth.refreshTokens(refreshToken);
     this.setRefreshCookie(res, result.refreshToken);
 
-    return {
+    return sendResponse('Token refreshed successfully', {
       accessToken: result.accessToken,
-    };
-  }
-
-  @Post('logout')
-  @ApiBearerAuth()
-  async logout(
-    @Req() req: Request & { user: User },
-    @Res({ passthrough: true }) res: Response,
-  ) {
-    await this.auth.logout(req.user.id);
-    res.clearCookie('refresh_token', {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
-      path: '/',
     });
-    return { success: true };
   }
 
   @Get('me')
   @ApiBearerAuth()
   async me(@Req() req: Request & { user: User }) {
-    return this.auth.getUser(req.user.id);
-  }
-
-  @Public()
-  @Post('forgot-password')
-  @ApiBody({ type: ForgotPasswordDto })
-  async forgotPassword(@Body() dto: ForgotPasswordDto) {
-    return this.auth.forgotPassword(dto);
-  }
-
-  @Public()
-  @Post('verify-reset-otp')
-  @ApiBody({ type: VerifyOtpDto })
-  async verifyResetOtp(@Body() dto: VerifyOtpDto) {
-    return this.auth.verifyResetOtp(dto);
-  }
-
-  @Public()
-  @Post('reset-password')
-  @ApiBody({ type: ResetPasswordDto })
-  async resetPassword(@Body() dto: ResetPasswordDto) {
-    return this.auth.resetPassword(dto);
+    const user = await this.auth.getUser(req.user.id);
+    return sendResponse('User profile fetched successfully', user);
   }
 }

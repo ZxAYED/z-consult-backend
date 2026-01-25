@@ -7,21 +7,18 @@ import {
   Patch,
   Post,
   Query,
-  Req,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Role, User } from '@prisma/client';
-import { Request } from 'express';
+import { Role } from '@prisma/client';
 import { Roles } from 'src/common/decorator/rolesDecorator';
 import { sendResponse } from 'src/utils/sendResponse';
 import { CreateStaffDto } from './dto/create-staff.dto';
-import { UpdateMyAvailabilityDto } from './dto/update-my-availability.dto';
 import { UpdateStaffDto } from './dto/update-staff.dto';
 import { StaffService } from './staff.service';
 
-@ApiTags(Role.STAFF)
+@ApiTags('Staff')
 @ApiBearerAuth()
-@Controller(Role.STAFF)
+@Controller('staff')
 export class StaffController {
   constructor(private readonly staffService: StaffService) {}
 
@@ -37,16 +34,6 @@ export class StaffController {
   async findAll(@Query('page') page?: number, @Query('limit') limit?: number) {
     const result = await this.staffService.findAll(page, limit);
     return sendResponse('Staff list fetched successfully', result);
-  }
-
-  @Roles(Role.STAFF)
-  @Patch('me/availability')
-  async updateMyAvailability(
-    @Req() req: Request & { user: User },
-    @Body() dto: UpdateMyAvailabilityDto,
-  ) {
-    const data = await this.staffService.updateMyAvailability(req.user.id, dto);
-    return sendResponse('Availability updated successfully', data);
   }
 
   @Roles(Role.ADMIN)

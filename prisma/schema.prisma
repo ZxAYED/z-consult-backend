@@ -49,8 +49,6 @@ enum LogAction {
 
 enum Role {
   ADMIN
-  USER
-  STAFF
 }
 
 //
@@ -64,33 +62,23 @@ model User {
   refreshTokenHash  String?
   resetOtp          String?
   resetOtpExpiresAt DateTime?
-  role              Role      @default(USER)
-
-  staffProfile Staff? // 1:1 relation to Staff
-
-  // For simplicity, we removed ownerId based on "single-system" requirement.
-  // But to avoid breaking existing relations if we keep them, I will comment them out or remove them.
-  // The user explicitly asked for specific Staff and Service models.
-  // I will assume other models (Appointment, QueueItem, ActivityLog) are not focus now,
-  // but I should update them to not rely on ownerId if possible, or just leave them broken/commented
-  // until next step. However, the user said "Do NOT implement appointments/queue yet".
-  // So I will comment out Appointment/QueueItem/ActivityLog to avoid validation errors with missing ownerId relations.
-  // OR I can keep them but remove ownerId.
-  // Let's remove ownerId from everything to match the new "single-system" paradigm.
+  role              Role      @default(ADMIN)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
 
 model Staff {
-  id     String @id @default(cuid())
-  userId String @unique
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-
+  id            String            @id @default(cuid())
   name          String
   type          StaffType
   dailyCapacity Int               @default(5)
   availability  StaffAvailability @default(AVAILABLE)
+
+  contactEmail String?
+  contactPhone String?
+
+  appointments Appointment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -104,20 +92,20 @@ model Service {
   name              String
   durationMinutes   Int
   requiredStaffType StaffType
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+
+  appointments Appointment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([requiredStaffType])
 }
 
-// Commenting out Appointment/Queue/Log for now as per "Do NOT implement appointments/queue yet"
-// and to avoid ownerId conflicts. I will restore them when needed.
-/*
 model Appointment {
-  id      String @id @default(cuid())
-  // ownerId removed
-  
-  customerName String
+  id            String  @id @default(cuid())
+  customerName  String
+  customerEmail String?
+  customerPhone String?
 
   serviceId String
   service   Service @relation(fields: [serviceId], references: [id])
@@ -130,9 +118,34 @@ model Appointment {
 
   status AppointmentStatus @default(SCHEDULED)
 
+  queueItem QueueItem?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([staffId, startAt])
+  @@index([startAt])
+  @@index([staffId])
+  @@index([status])
 }
-*/
+
+model QueueItem {
+  id            String      @id @default(cuid())
+  appointmentId String      @unique
+  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  status   QueueStatus @default(ACTIVE)
+  queuedAt DateTime    @default(now())
+
+  @@index([status, queuedAt])
+}
+
+model ActivityLog {
+  id        String    @id @default(cuid())
+  action    LogAction
+  message   String
+  metadata  Json?     // Flexible metadata
+  createdAt DateTime  @default(now())
+
+  @@index([action])
+  @@index([createdAt])
+}

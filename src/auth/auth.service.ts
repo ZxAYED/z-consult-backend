@@ -1,20 +1,16 @@
 import {
-  BadRequestException,
   ConflictException,
   Injectable,
-  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
-import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
-import { ResetPasswordDto } from './dto/reset-password.dto';
 import { SignupDto } from './dto/signup.dto';
-import { VerifyOtpDto } from './dto/verify-otp.dto';
 
 @Injectable()
 export class AuthService {
@@ -23,10 +19,6 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly configService: ConfigService,
   ) {}
-
-  private generateOtp() {
-    return Math.floor(10000 + Math.random() * 90000).toString(); // 5 digit OTP
-  }
 
   private hashToken(token: string) {
     return crypto.createHash('sha256').update(token).digest('hex');
@@ -86,6 +78,7 @@ export class AuthService {
         email: dto.email,
         passwordHash,
         name: dto.name,
+        role: Role.ADMIN, // Explicitly set role to ADMIN
       },
     });
 
@@ -136,19 +129,6 @@ export class AuthService {
     };
   }
 
-  async logout(userId: string) {
-    await this.prisma.user.updateMany({
-      where: {
-        id: userId,
-        refreshTokenHash: { not: null },
-      },
-      data: {
-        refreshTokenHash: null,
-      },
-    });
-    return { success: true };
-  }
-
   async refreshTokens(refreshToken: string) {
     if (!refreshToken) throw new UnauthorizedException('No refresh token');
 
@@ -194,82 +174,5 @@ export class AuthService {
       },
     });
     return user;
-  }
-
-  async forgotPassword(dto: ForgotPasswordDto) {
-    const user = await this.prisma.user.findUnique({
-      where: { email: dto.email },
-    });
-
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-
-    const otp = this.generateOtp();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: {
-        resetOtp: otp,
-        resetOtpExpiresAt: expiresAt,
-      },
-    });
-
-    // TODO: Send email
-    console.log(`[Mock Email] OTP for ${dto.email}: ${otp}`);
-
-    return { message: 'OTP sent to email' };
-  }
-
-  async verifyResetOtp(dto: VerifyOtpDto) {
-    const user = await this.prisma.user.findUnique({
-      where: { email: dto.email },
-    });
-
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-
-    if (!user.resetOtp || user.resetOtp !== dto.otp) {
-      throw new BadRequestException('Invalid OTP');
-    }
-
-    if (!user.resetOtpExpiresAt || user.resetOtpExpiresAt < new Date()) {
-      throw new BadRequestException('OTP expired');
-    }
-
-    return { message: 'OTP verified' };
-  }
-
-  async resetPassword(dto: ResetPasswordDto) {
-    const user = await this.prisma.user.findUnique({
-      where: { email: dto.email },
-    });
-
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-
-    if (!user.resetOtp || user.resetOtp !== dto.otp) {
-      throw new BadRequestException('Invalid OTP');
-    }
-
-    if (!user.resetOtpExpiresAt || user.resetOtpExpiresAt < new Date()) {
-      throw new BadRequestException('OTP expired');
-    }
-
-    const passwordHash = await bcrypt.hash(dto.newPassword, 10);
-
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: {
-        passwordHash,
-        resetOtp: null,
-        resetOtpExpiresAt: null,
-      },
-    });
-
-    return { message: 'Password reset successfully' };
   }
 }
