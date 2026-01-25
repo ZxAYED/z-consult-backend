@@ -6,6 +6,7 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { Prisma, User } from '@prisma/client';
@@ -19,6 +20,7 @@ export class AuthGuard implements CanActivate {
     private readonly jwtService: JwtService,
     private readonly prisma: PrismaService,
     private readonly reflector: Reflector,
+    private readonly configService: ConfigService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -38,29 +40,35 @@ export class AuthGuard implements CanActivate {
     const authorization = request.headers.authorization;
 
     if (!authorization) {
-      throw new UnauthorizedException('Unauthorized , No token provided');
+      throw new UnauthorizedException('Unauthorized, No token provided');
     }
 
     const rawToken = authorization.startsWith('Bearer ')
       ? authorization.slice(7)
       : authorization;
 
-    const decoded: unknown = this.jwtService.decode(rawToken);
-    if (!decoded || typeof decoded !== 'object' || decoded === null) {
-      throw new UnauthorizedException('Unauthorized , Invalid  token');
+    let payload: any;
+    try {
+      payload = await this.jwtService.verifyAsync<Record<string, unknown>>(
+        rawToken,
+        {
+          secret:
+            this.configService.get<string>('JWT_ACCESS_SECRET') ||
+            'access-secret',
+        },
+      );
+    } catch {
+      throw new UnauthorizedException('Unauthorized, Invalid token');
     }
 
-    const decodedRecord = decoded as Record<string, unknown>;
-    const userId =
-      typeof decodedRecord.id === 'string' ? decodedRecord.id : null;
-    if (!userId) {
-      throw new UnauthorizedException('Unauthorized , Invalid token payload');
+    if (!payload || typeof payload !== 'object' || !('sub' in payload)) {
+      throw new UnauthorizedException('Unauthorized, Invalid token payload');
     }
 
     let user: User | null;
     try {
       user = await this.prisma.user.findUnique({
-        where: { id: userId },
+        where: { id: String((payload as Record<string, unknown>).sub) },
       });
     } catch (error: unknown) {
       if (
@@ -77,7 +85,7 @@ export class AuthGuard implements CanActivate {
     }
 
     if (!user) {
-      throw new UnauthorizedException('Unauthorized , User not found');
+      throw new UnauthorizedException('Unauthorized, User not found');
     }
 
     request.user = user;

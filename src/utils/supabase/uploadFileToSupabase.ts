@@ -27,7 +27,7 @@ const uploadToSupabase = async (
   const filePath = `${folder}/${Date.now()}-${safeFileName}`;
 
   const { error } = await supabase.storage
-    .from('attachments')
+    .from('attachments/appointments')
     .upload(filePath, file.buffer, {
       contentType: file.mimetype || 'application/octet-stream',
       upsert: true,
@@ -35,7 +35,9 @@ const uploadToSupabase = async (
 
   if (error) throw error;
 
-  const { data } = supabase.storage.from('attachments').getPublicUrl(filePath);
+  const { data } = supabase.storage
+    .from('attachments/appointments')
+    .getPublicUrl(filePath);
 
   return {
     fileUrl: data.publicUrl,

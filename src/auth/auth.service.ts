@@ -1,18 +1,20 @@
 import {
+  BadRequestException,
   ConflictException,
-  ForbiddenException,
   Injectable,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { Prisma, Role, type User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
-import { generateOtpEmailTemplate } from 'src/utils/generateOtpEmailTemplate';
-import { sendVerificationEmail } from 'src/utils/sendVerificationEmail';
 import { PrismaService } from '../prisma/prisma.service';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { LoginDto } from './dto/login.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
+import { SignupDto } from './dto/signup.dto';
+import { VerifyOtpDto } from './dto/verify-otp.dto';
 
 @Injectable()
 export class AuthService {
@@ -23,466 +25,251 @@ export class AuthService {
   ) {}
 
   private generateOtp() {
-    return Math.floor(10000 + Math.random() * 90000).toString();
-  }
-
-  private getOtpExpiry() {
-    return new Date(Date.now() + 10 * 60 * 1000);
+    return Math.floor(10000 + Math.random() * 90000).toString(); // 5 digit OTP
   }
 
   private hashToken(token: string) {
     return crypto.createHash('sha256').update(token).digest('hex');
   }
 
-  private getRefreshExpiresAt() {
-    const days = Number(
-      this.configService.get<string>('REFRESH_TOKEN_TTL_DAYS') ?? '30',
-    );
-    const ttlDays = Number.isFinite(days) && days > 0 ? days : 30;
-    return new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
+  private async getTokens(userId: string, email: string) {
+    const [accessToken, refreshToken] = await Promise.all([
+      this.jwt.signAsync(
+        { sub: userId, email },
+        {
+          secret:
+            this.configService.get<string>('JWT_ACCESS_SECRET') ||
+            'access-secret',
+          expiresIn: '15d',
+        },
+      ),
+      this.jwt.signAsync(
+        { sub: userId, email },
+        {
+          secret:
+            this.configService.get<string>('JWT_REFRESH_SECRET') ||
+            'refresh-secret',
+          expiresIn: '60d',
+        },
+      ),
+    ]);
+
+    return {
+      accessToken,
+      refreshToken,
+    };
   }
 
-  private async createRefreshSession(params: {
-    userId: string;
-    refreshToken: string;
-    deviceId?: string;
-    userAgent?: string | string[];
-    ip?: string;
-  }) {
-    const refreshTokenHash = this.hashToken(params.refreshToken);
-
-    const session = await this.prisma.refreshSession.create({
+  private async updateRefreshTokenHash(userId: string, refreshToken: string) {
+    const hash = this.hashToken(refreshToken);
+    await this.prisma.user.update({
+      where: { id: userId },
       data: {
-        userId: params.userId,
-        refreshTokenHash,
-        deviceId: params.deviceId,
-        userAgent:
-          typeof params.userAgent === 'string' ? params.userAgent : undefined,
-        ip: params.ip,
-        expiresAt: this.getRefreshExpiresAt(),
+        refreshTokenHash: hash,
       },
-      select: { id: true, expiresAt: true },
     });
-
-    return { sessionId: session.id, expiresAt: session.expiresAt };
   }
 
-  async signup(params: { email: string; password: string; name?: string }) {
+  async signup(dto: SignupDto) {
     const existing = await this.prisma.user.findUnique({
-      where: { email: params.email },
-      select: {
-        id: true,
-        isVerified: true,
-        isBlocked: true,
-        isDeleted: true,
-      },
+      where: { email: dto.email },
     });
 
     if (existing) {
-      if (existing.isBlocked) throw new ConflictException('User is blocked');
-      if (existing.isDeleted) throw new ConflictException('User is deleted');
-      if (existing.isVerified) {
-        throw new ConflictException('Email already registered');
-      }
-
-      const otp = this.generateOtp();
-      const otpExpiry = this.getOtpExpiry();
-
-      await this.prisma.user.update({
-        where: { email: params.email },
-        data: {
-          registrationOtp: otp,
-          registrationOtpExpireIn: otpExpiry,
-          registrationOtpAttempts: 0,
-        },
-      });
-
-      const htmlText = generateOtpEmailTemplate(otp);
-      await sendVerificationEmail(
-        this.configService,
-        params.email,
-        'Verify your account',
-        htmlText,
-      );
-
-      return {
-        message:
-          'Verification OTP sent. Check your email to verify your account.',
-      };
+      throw new ConflictException('Email already registered');
     }
 
-    const passwordHash = await bcrypt.hash(params.password, 12);
-    const otp = this.generateOtp();
-    const otpExpiry = this.getOtpExpiry();
+    const passwordHash = await bcrypt.hash(dto.password, 10);
 
-    const user = await this.prisma.user.create({
+    const newUser = await this.prisma.user.create({
       data: {
-        email: params.email,
-        name: params.name,
+        email: dto.email,
         passwordHash,
-        isVerified: false,
-        registrationOtp: otp,
-        registrationOtpExpireIn: otpExpiry,
+        name: dto.name,
       },
+    });
+
+    const tokens = await this.getTokens(newUser.id, newUser.email);
+    await this.updateRefreshTokenHash(newUser.id, tokens.refreshToken);
+
+    return {
+      user: {
+        id: newUser.id,
+        email: newUser.email,
+        name: newUser.name,
+        createdAt: newUser.createdAt,
+        role: newUser.role,
+      },
+      ...tokens,
+    };
+  }
+
+  async login(dto: LoginDto) {
+    const user = await this.prisma.user.findUnique({
+      where: { email: dto.email },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    const isPasswordValid = await bcrypt.compare(
+      dto.password,
+      user.passwordHash,
+    );
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    const tokens = await this.getTokens(user.id, user.email);
+    await this.updateRefreshTokenHash(user.id, tokens.refreshToken);
+
+    return {
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        createdAt: user.createdAt,
+        role: user.role,
+      },
+      ...tokens,
+    };
+  }
+
+  async logout(userId: string) {
+    await this.prisma.user.updateMany({
+      where: {
+        id: userId,
+        refreshTokenHash: { not: null },
+      },
+      data: {
+        refreshTokenHash: null,
+      },
+    });
+    return { success: true };
+  }
+
+  async refreshTokens(refreshToken: string) {
+    if (!refreshToken) throw new UnauthorizedException('No refresh token');
+
+    let payload;
+    try {
+      payload = await this.jwt.verifyAsync(refreshToken, {
+        secret:
+          this.configService.get<string>('JWT_REFRESH_SECRET') ||
+          'refresh-secret',
+      });
+    } catch {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+    });
+
+    if (!user || !user.refreshTokenHash) {
+      throw new UnauthorizedException('Access denied');
+    }
+
+    const refreshHash = this.hashToken(refreshToken);
+    if (user.refreshTokenHash !== refreshHash) {
+      throw new UnauthorizedException('Access denied');
+    }
+
+    const tokens = await this.getTokens(user.id, user.email);
+    await this.updateRefreshTokenHash(user.id, tokens.refreshToken);
+
+    return tokens;
+  }
+
+  async getUser(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
       select: {
         id: true,
         email: true,
         name: true,
-        role: true,
-        isVerified: true,
         createdAt: true,
+        role: true,
       },
     });
-
-    const htmlText = generateOtpEmailTemplate(otp);
-    await sendVerificationEmail(
-      this.configService,
-      params.email,
-      'Verify your account',
-      htmlText,
-    );
-
-    return {
-      message: 'Signup successful. Check your email for verification OTP.',
-      user,
-    };
+    return user;
   }
 
-  async resendRegistrationOtp(params: { email: string }) {
+  async forgotPassword(dto: ForgotPasswordDto) {
     const user = await this.prisma.user.findUnique({
-      where: { email: params.email },
+      where: { email: dto.email },
     });
 
-    if (!user) throw new NotFoundException('User not found');
-    if (user.isVerified) {
-      throw new ConflictException('User already verified');
+    if (!user) {
+      throw new NotFoundException('User not found');
     }
-    if (user.isBlocked) throw new ConflictException('User is blocked');
-    if (user.isDeleted) throw new ConflictException('User is deleted');
 
     const otp = this.generateOtp();
-    const otpExpiry = this.getOtpExpiry();
-
-    await this.prisma.user.update({
-      where: { email: params.email },
-      data: {
-        registrationOtp: otp,
-        registrationOtpExpireIn: otpExpiry,
-        registrationOtpAttempts: 0,
-      },
-    });
-
-    const htmlText = generateOtpEmailTemplate(otp);
-    await sendVerificationEmail(
-      this.configService,
-      params.email,
-      'Verify your account',
-      htmlText,
-    );
-
-    return {
-      message:
-        'Verification OTP resend successfully. Check your email to verify your account. You have 10 minutes to verify.',
-    };
-  }
-
-  async verifyRegistrationOtp(params: { email: string; otp: string }) {
-    const user = await this.prisma.user.findUnique({
-      where: { email: params.email },
-    });
-
-    if (!user) throw new NotFoundException('User not found');
-    if (user.isVerified) throw new ConflictException('User already verified');
-    if (user.isBlocked) throw new ConflictException('User is blocked');
-    if (user.isDeleted) throw new ConflictException('User is deleted');
-
-    if (user.registrationOtpAttempts >= 5) {
-      throw new ForbiddenException('Too many OTP attempts. Please resend OTP.');
-    }
-
-    const now = Date.now();
-    const expiresAt = user.registrationOtpExpireIn?.getTime() ?? 0;
-    if (!user.registrationOtp || expiresAt <= now) {
-      throw new ConflictException('OTP expired. Please resend OTP.');
-    }
-
-    if (user.registrationOtp !== params.otp) {
-      await this.prisma.user.update({
-        where: { id: user.id },
-        data: { registrationOtpAttempts: { increment: 1 } },
-      });
-      throw new ConflictException('Invalid OTP');
-    }
-
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: {
-        isVerified: true,
-        registrationOtp: null,
-        registrationOtpExpireIn: null,
-        registrationOtpAttempts: 0,
-      },
-    });
-
-    return { message: 'Account verified successfully' };
-  }
-
-  async login(
-    params: { email: string; password: string },
-    ctx?: { ip?: string; userAgent?: string | string[] },
-  ) {
-    const user = await this.prisma.user.findUnique({
-      where: { email: params.email },
-    });
-
-    if (!user) throw new NotFoundException('User not found');
-    if (!user.isVerified) {
-      throw new ConflictException(
-        'User not verified, Please verify your account first.',
-      );
-    }
-    if (user.isBlocked) throw new ConflictException('User is blocked');
-    if (user.isDeleted) throw new ConflictException('User is deleted');
-
-    const ok = await bcrypt.compare(params.password, user.passwordHash);
-    if (!ok) {
-      throw new UnauthorizedException('Invalid Password');
-    }
-
-    const safeUser = {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      role: user.role,
-      createdAt: user.createdAt,
-    };
-
-    const refreshToken = crypto.randomBytes(48).toString('base64url');
-    const refreshSession = await this.createRefreshSession({
-      userId: user.id,
-      refreshToken,
-      ip: ctx?.ip,
-      userAgent: ctx?.userAgent,
-    });
-
-    return {
-      user: safeUser,
-      accessToken: await this.signAccessToken(safeUser),
-      refreshToken,
-      refreshSession,
-    };
-  }
-
-  async forgotPassword(params: { email: string }) {
-    const user = await this.prisma.user.findUnique({
-      where: { email: params.email },
-    });
-
-    if (!user) throw new NotFoundException('User not found');
-    if (!user.isVerified) {
-      throw new ConflictException(
-        'User not verified, Please verify your account first.',
-      );
-    }
-    if (user.isBlocked) throw new ConflictException('User is blocked');
-    if (user.isDeleted) throw new ConflictException('User is deleted');
-
-    const otp = this.generateOtp();
-    const otpExpiry = this.getOtpExpiry();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     await this.prisma.user.update({
       where: { id: user.id },
       data: {
         resetOtp: otp,
-        resetOtpExpireIn: otpExpiry,
-        resetOtpAttempts: 0,
+        resetOtpExpiresAt: expiresAt,
       },
     });
 
-    const htmlText = generateOtpEmailTemplate(otp);
-    await sendVerificationEmail(
-      this.configService,
-      params.email,
-      'Reset your password',
-      htmlText,
-    );
+    // TODO: Send email
+    console.log(`[Mock Email] OTP for ${dto.email}: ${otp}`);
 
-    return {
-      message:
-        'Password reset OTP sent. Check your email. You have 10 minutes to reset.',
-    };
+    return { message: 'OTP sent to email' };
   }
 
-  async resetPassword(params: {
-    email: string;
-    otp: string;
-    newPassword: string;
-  }) {
+  async verifyResetOtp(dto: VerifyOtpDto) {
     const user = await this.prisma.user.findUnique({
-      where: { email: params.email },
+      where: { email: dto.email },
     });
 
-    if (!user) throw new NotFoundException('User not found');
-    if (user.isBlocked) throw new ConflictException('User is blocked');
-    if (user.isDeleted) throw new ConflictException('User is deleted');
-
-    if (user.resetOtpAttempts >= 5) {
-      throw new ForbiddenException('Too many OTP attempts. Please resend OTP.');
+    if (!user) {
+      throw new NotFoundException('User not found');
     }
 
-    const now = Date.now();
-    const expiresAt = user.resetOtpExpireIn?.getTime() ?? 0;
-    if (!user.resetOtp || expiresAt <= now) {
-      throw new ConflictException('OTP expired. Please resend OTP.');
+    if (!user.resetOtp || user.resetOtp !== dto.otp) {
+      throw new BadRequestException('Invalid OTP');
     }
 
-    if (user.resetOtp !== params.otp) {
-      await this.prisma.user.update({
-        where: { id: user.id },
-        data: { resetOtpAttempts: { increment: 1 } },
-      });
-      throw new ConflictException('Invalid OTP');
+    if (!user.resetOtpExpiresAt || user.resetOtpExpiresAt < new Date()) {
+      throw new BadRequestException('OTP expired');
     }
 
-    const passwordHash = await bcrypt.hash(params.newPassword, 12);
+    return { message: 'OTP verified' };
+  }
 
-    await this.prisma.$transaction([
-      this.prisma.user.update({
-        where: { id: user.id },
-        data: {
-          passwordHash,
-          resetOtp: null,
-          resetOtpExpireIn: null,
-          resetOtpAttempts: 0,
-        },
-      }),
-      this.prisma.refreshSession.updateMany({
-        where: { userId: user.id, revokedAt: null },
-        data: { revokedAt: new Date() },
-      }),
-    ]);
+  async resetPassword(dto: ResetPasswordDto) {
+    const user = await this.prisma.user.findUnique({
+      where: { email: dto.email },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    if (!user.resetOtp || user.resetOtp !== dto.otp) {
+      throw new BadRequestException('Invalid OTP');
+    }
+
+    if (!user.resetOtpExpiresAt || user.resetOtpExpiresAt < new Date()) {
+      throw new BadRequestException('OTP expired');
+    }
+
+    const passwordHash = await bcrypt.hash(dto.newPassword, 10);
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        passwordHash,
+        resetOtp: null,
+        resetOtpExpiresAt: null,
+      },
+    });
 
     return { message: 'Password reset successfully' };
-  }
-
-  async changePassword(
-    params: { oldPassword: string; newPassword: string },
-    user?: User,
-  ) {
-    if (!user) throw new UnauthorizedException('Unauthorized');
-
-    const fresh = await this.prisma.user.findUnique({ where: { id: user.id } });
-    if (!fresh) throw new UnauthorizedException('Unauthorized');
-    if (fresh.isBlocked) throw new ConflictException('User is blocked');
-    if (fresh.isDeleted) throw new ConflictException('User is deleted');
-
-    const ok = await bcrypt.compare(params.oldPassword, fresh.passwordHash);
-    if (!ok) throw new UnauthorizedException('Invalid Password');
-
-    const passwordHash = await bcrypt.hash(params.newPassword, 12);
-
-    await this.prisma.$transaction([
-      this.prisma.user.update({
-        where: { id: fresh.id },
-        data: { passwordHash },
-      }),
-      this.prisma.refreshSession.updateMany({
-        where: { userId: fresh.id, revokedAt: null },
-        data: { revokedAt: new Date() },
-      }),
-    ]);
-
-    return { message: 'Password changed successfully' };
-  }
-
-  async refreshToken(
-    params: { refreshToken: string; deviceId?: string },
-    ctx?: { ip?: string; userAgent?: string | string[] },
-  ) {
-    const refreshTokenHash = this.hashToken(params.refreshToken);
-
-    const session = await this.prisma.refreshSession.findFirst({
-      where: { refreshTokenHash },
-      include: { user: true },
-    });
-
-    if (!session) throw new UnauthorizedException('Invalid refresh token');
-    if (session.revokedAt)
-      throw new UnauthorizedException('Refresh token revoked');
-    if (session.expiresAt.getTime() <= Date.now()) {
-      throw new UnauthorizedException('Refresh token expired');
-    }
-    if (
-      params.deviceId &&
-      session.deviceId &&
-      params.deviceId !== session.deviceId
-    ) {
-      throw new UnauthorizedException('Invalid refresh token');
-    }
-
-    const user = session.user;
-    if (!user) throw new UnauthorizedException('Invalid refresh token');
-    if (!user.isVerified) {
-      throw new ConflictException(
-        'User not verified, Please verify your account first.',
-      );
-    }
-    if (user.isBlocked) throw new ConflictException('User is blocked');
-    if (user.isDeleted) throw new ConflictException('User is deleted');
-
-    const nextRefreshToken = crypto.randomBytes(48).toString('base64url');
-
-    const rotated = await this.prisma.$transaction(
-      async (tx: Prisma.TransactionClient) => {
-        const next = await tx.refreshSession.create({
-          data: {
-            userId: user.id,
-            refreshTokenHash: this.hashToken(nextRefreshToken),
-            deviceId: session.deviceId ?? params.deviceId,
-            userAgent:
-              typeof ctx?.userAgent === 'string'
-                ? ctx.userAgent
-                : (session.userAgent ?? undefined),
-            ip: ctx?.ip ?? session.ip ?? undefined,
-            expiresAt: this.getRefreshExpiresAt(),
-          },
-          select: { id: true, expiresAt: true },
-        });
-
-        await tx.refreshSession.update({
-          where: { id: session.id },
-          data: { revokedAt: new Date(), replacedById: next.id },
-        });
-
-        return next;
-      },
-    );
-
-    const safeUser = {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      role: user.role,
-      createdAt: user.createdAt,
-    };
-
-    return {
-      accessToken: await this.signAccessToken(safeUser),
-      refreshToken: nextRefreshToken,
-      refreshSession: { sessionId: rotated.id, expiresAt: rotated.expiresAt },
-    };
-  }
-
-  private async signAccessToken(user: {
-    id: string;
-    email: string;
-    role: Role;
-  }) {
-    return this.jwt.signAsync({
-      id: user.id,
-      sub: user.id,
-      email: user.email,
-      role: user.role,
-    });
   }
 }

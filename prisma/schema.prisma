@@ -4,47 +4,135 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  // url      = env("DATABASE_URL")
+}
+
+//
+// ENUMS
+//
+enum StaffType {
+  DOCTOR
+  CONSULTANT
+  SUPPORT_AGENT
+  OTHER
+}
+
+enum StaffAvailability {
+  AVAILABLE
+  ON_LEAVE
+}
+
+enum AppointmentStatus {
+  WAITING // in queue (no staff yet)
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum QueueStatus {
+  ACTIVE
+  ASSIGNED
+  CANCELLED
+}
+
+enum LogAction {
+  APPOINTMENT_CREATED
+  APPOINTMENT_UPDATED
+  APPOINTMENT_CANCELLED
+  QUEUE_JOINED
+  QUEUE_ASSIGNED
+  STAFF_STATUS_CHANGED
+  SERVICE_CREATED
+  STAFF_CREATED
 }
 
 enum Role {
-  USER
   ADMIN
+  USER
+  STAFF
 }
 
+//
+// MODELS
+//
 model User {
-  id                      String   @id @default(uuid())
-  email                   String   @unique
-  name                    String?
-  passwordHash            String
-  role                    Role     @default(USER)
-  isVerified              Boolean  @default(false)
-  isBlocked               Boolean  @default(false)
-  isDeleted               Boolean  @default(false)
-  registrationOtp         String?
-  registrationOtpExpireIn DateTime?
-  registrationOtpAttempts Int      @default(0)
-  resetOtp                String?
-  resetOtpExpireIn        DateTime?
-  resetOtpAttempts        Int      @default(0)
-  createdAt               DateTime @default(now())
-  updatedAt               DateTime @updatedAt
+  id                String    @id @default(cuid())
+  email             String    @unique
+  passwordHash      String
+  name              String?
+  refreshTokenHash  String?
+  resetOtp          String?
+  resetOtpExpiresAt DateTime?
+  role              Role      @default(USER)
 
-  refreshSessions RefreshSession[]
+  staffProfile Staff? // 1:1 relation to Staff
+
+  // For simplicity, we removed ownerId based on "single-system" requirement.
+  // But to avoid breaking existing relations if we keep them, I will comment them out or remove them.
+  // The user explicitly asked for specific Staff and Service models.
+  // I will assume other models (Appointment, QueueItem, ActivityLog) are not focus now,
+  // but I should update them to not rely on ownerId if possible, or just leave them broken/commented
+  // until next step. However, the user said "Do NOT implement appointments/queue yet".
+  // So I will comment out Appointment/QueueItem/ActivityLog to avoid validation errors with missing ownerId relations.
+  // OR I can keep them but remove ownerId.
+  // Let's remove ownerId from everything to match the new "single-system" paradigm.
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
-model RefreshSession {
-  id               String   @id @default(uuid())
-  userId           String
-  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  refreshTokenHash String
-  revokedAt        DateTime?
-  replacedById     String?
-  deviceId         String?
-  userAgent        String?
-  ip               String?
-  expiresAt        DateTime
-  createdAt        DateTime @default(now())
+model Staff {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId])
-  @@index([refreshTokenHash])
+  name          String
+  type          StaffType
+  dailyCapacity Int               @default(5)
+  availability  StaffAvailability @default(AVAILABLE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([type])
+  @@index([availability])
 }
+
+model Service {
+  id                String    @id @default(cuid())
+  name              String
+  durationMinutes   Int
+  requiredStaffType StaffType
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([requiredStaffType])
+}
+
+// Commenting out Appointment/Queue/Log for now as per "Do NOT implement appointments/queue yet"
+// and to avoid ownerId conflicts. I will restore them when needed.
+/*
+model Appointment {
+  id      String @id @default(cuid())
+  // ownerId removed
+  
+  customerName String
+
+  serviceId String
+  service   Service @relation(fields: [serviceId], references: [id])
+
+  staffId String?
+  staff   Staff?  @relation(fields: [staffId], references: [id])
+
+  startAt DateTime
+  endAt   DateTime
+
+  status AppointmentStatus @default(SCHEDULED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([staffId, startAt])
+}
+*/

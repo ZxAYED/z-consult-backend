@@ -11,7 +11,7 @@ export const deleteFilesFromSupabase = async (
 
   const supabase = getSupabaseClient(configService);
   const { error } = await supabase.storage
-    .from('attachments')
+    .from('attachments/appointments')
     .remove(filePaths);
 
   if (error) {

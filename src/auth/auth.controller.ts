@@ -1,14 +1,19 @@
-import { Body, Controller, Post, Req } from '@nestjs/common';
-import type { User } from '@prisma/client';
-import type { Request } from 'express';
+import {
+  Body,
+  Controller,
+  Get,
+  Post,
+  Req,
+  Res,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiTags } from '@nestjs/swagger';
+import { User } from '@prisma/client';
+import type { Request, Response } from 'express';
 import { Public } from 'src/common/decorator/rolesDecorator';
 import { AuthService } from './auth.service';
-import { ChangePasswordDto } from './dto/change-password.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
-import { RefreshTokenDto } from './dto/refresh-token.dto';
-import { ResendOtpDto } from './dto/resend-otp.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { SignupDto } from './dto/signup.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
@@ -18,63 +23,105 @@ import { VerifyOtpDto } from './dto/verify-otp.dto';
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
 
+  private setRefreshCookie(res: Response, refreshToken: string) {
+    res.cookie('refresh_token', refreshToken, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      path: '/',
+      maxAge: 60 * 24 * 60 * 60 * 1000, // 60 days
+    });
+  }
+
   @Public()
-  @Post('signup')
+  @Post('register')
   @ApiBody({ type: SignupDto })
-  signup(@Body() dto: SignupDto) {
-    return this.auth.signup(dto);
+  async register(
+    @Body() dto: SignupDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.auth.signup(dto);
+    this.setRefreshCookie(res, result.refreshToken);
+    return {
+      user: result.user,
+      accessToken: result.accessToken,
+    };
   }
 
   @Public()
   @Post('login')
   @ApiBody({ type: LoginDto })
-  login(@Body() dto: LoginDto, @Req() req: Request) {
-    const ip = req.ip;
-    const userAgent = req.headers['user-agent'];
-    return this.auth.login(dto, { ip, userAgent });
+  async login(
+    @Body() dto: LoginDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.auth.login(dto);
+    this.setRefreshCookie(res, result.refreshToken);
+    return {
+      user: result.user,
+      accessToken: result.accessToken,
+    };
   }
 
   @Public()
-  @Post('resend-otp')
-  @ApiBody({ type: ResendOtpDto })
-  resendOtp(@Body() dto: ResendOtpDto) {
-    return this.auth.resendRegistrationOtp(dto);
+  @Post('refresh')
+  async refresh(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const refreshToken = req.cookies['refresh_token'] as string | undefined;
+    if (!refreshToken) {
+      throw new UnauthorizedException('No refresh token provided');
+    }
+
+    const result = await this.auth.refreshTokens(refreshToken);
+    this.setRefreshCookie(res, result.refreshToken);
+
+    return {
+      accessToken: result.accessToken,
+    };
   }
 
-  @Public()
-  @Post('verify-otp')
-  @ApiBody({ type: VerifyOtpDto })
-  verifyOtp(@Body() dto: VerifyOtpDto) {
-    return this.auth.verifyRegistrationOtp(dto);
+  @Post('logout')
+  @ApiBearerAuth()
+  async logout(
+    @Req() req: Request & { user: User },
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    await this.auth.logout(req.user.id);
+    res.clearCookie('refresh_token', {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      path: '/',
+    });
+    return { success: true };
+  }
+
+  @Get('me')
+  @ApiBearerAuth()
+  async me(@Req() req: Request & { user: User }) {
+    return this.auth.getUser(req.user.id);
   }
 
   @Public()
   @Post('forgot-password')
   @ApiBody({ type: ForgotPasswordDto })
-  forgotPassword(@Body() dto: ForgotPasswordDto) {
+  async forgotPassword(@Body() dto: ForgotPasswordDto) {
     return this.auth.forgotPassword(dto);
+  }
+
+  @Public()
+  @Post('verify-reset-otp')
+  @ApiBody({ type: VerifyOtpDto })
+  async verifyResetOtp(@Body() dto: VerifyOtpDto) {
+    return this.auth.verifyResetOtp(dto);
   }
 
   @Public()
   @Post('reset-password')
   @ApiBody({ type: ResetPasswordDto })
-  resetPassword(@Body() dto: ResetPasswordDto) {
+  async resetPassword(@Body() dto: ResetPasswordDto) {
     return this.auth.resetPassword(dto);
-  }
-
-  @Post('change-password')
-  @ApiBearerAuth()
-  @ApiBody({ type: ChangePasswordDto })
-  changePassword(@Body() dto: ChangePasswordDto, @Req() req: { user?: User }) {
-    return this.auth.changePassword(dto, req.user);
-  }
-
-  @Public()
-  @Post('refresh-token')
-  @ApiBody({ type: RefreshTokenDto })
-  refreshToken(@Body() dto: RefreshTokenDto, @Req() req: Request) {
-    const ip = req.ip;
-    const userAgent = req.headers['user-agent'];
-    return this.auth.refreshToken(dto, { ip, userAgent });
   }
 }
