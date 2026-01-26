@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import {
   AppointmentStatus,
+  LogAction,
   Prisma,
   QueueStatus,
   StaffAvailability,
@@ -38,49 +39,65 @@ export class DashboardService {
       },
     };
 
-    // 1. Total Appointments Today (excluding CANCELLED per common sense, but requirement says "Total" - usually implies active ones.
-    // Spec says: "count appointments where startAt in day range AND status != CANCELLED"
-    const totalAppointmentsToday = await this.prisma.appointment.count({
-      where: {
-        ...todayFilter,
-        status: { not: AppointmentStatus.CANCELLED },
-      },
-    });
-
-    // 2. Completed Count
-    const completedCount = await this.prisma.appointment.count({
-      where: {
-        ...todayFilter,
-        status: AppointmentStatus.COMPLETED,
-      },
-    });
-
-    // 3. Pending Count (SCHEDULED + WAITING in day range)
-    const pendingCount = await this.prisma.appointment.count({
-      where: {
-        ...todayFilter,
-        status: {
-          in: [AppointmentStatus.SCHEDULED, AppointmentStatus.WAITING],
+    const [
+      totalAppointmentsToday,
+      completedAppointmentsToday,
+      pendingAppointmentsToday,
+      waitingQueueCount,
+      latestActivityLogs,
+      totalServices,
+      totalAppointmentsAllTime,
+      completedAppointmentsAllTime,
+      allStaff,
+      appointmentCounts,
+    ] = await Promise.all([
+      this.prisma.appointment.count({
+        where: {
+          ...todayFilter,
+          status: { not: AppointmentStatus.CANCELLED },
         },
-      },
-    });
-
-    // 4. Waiting Queue Count (Active Queue Items)
-    // Requirement implies "Current waiting queue", which usually means ALL active queue items regardless of date.
-    // However, if we want strict "today's waiting", we filter by day.
-    // Usually "Queue" is a realtime structure.
-    // Let's use QueueItem table as requested.
-    const waitingQueueCount = await this.prisma.queueItem.count({
-      where: {
-        status: QueueStatus.ACTIVE,
-      },
-    });
-
-    // 5. Staff Load Summary
-    // We need to count appointments per staff for the day.
-    // Efficient way: Fetch all staff, then fetch grouped counts.
-
-    const [allStaff, appointmentCounts] = await Promise.all([
+      }),
+      this.prisma.appointment.count({
+        where: {
+          ...todayFilter,
+          status: AppointmentStatus.COMPLETED,
+        },
+      }),
+      this.prisma.appointment.count({
+        where: {
+          ...todayFilter,
+          status: {
+            in: [AppointmentStatus.SCHEDULED, AppointmentStatus.WAITING],
+          },
+        },
+      }),
+      this.prisma.queueItem.count({
+        where: {
+          status: QueueStatus.ACTIVE,
+        },
+      }),
+      this.prisma.activityLog.findMany({
+        where: {
+          action: {
+            in: [
+              LogAction.QUEUE_ASSIGNED,
+              LogAction.QUEUE_JOINED,
+              LogAction.APPOINTMENT_CREATED,
+              LogAction.APPOINTMENT_UPDATED,
+              LogAction.APPOINTMENT_CANCELLED,
+            ],
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      }),
+      this.prisma.service.count(),
+      this.prisma.appointment.count({
+        where: { status: { not: AppointmentStatus.CANCELLED } },
+      }),
+      this.prisma.appointment.count({
+        where: { status: AppointmentStatus.COMPLETED },
+      }),
       this.prisma.staff.findMany({
         orderBy: { name: 'asc' },
       }),
@@ -104,6 +121,14 @@ export class DashboardService {
         countsMap.set(item.staffId, item._count.staffId);
       }
     });
+
+    const totalStaff = allStaff.length;
+    const availableStaffCount = allStaff.filter(
+      (staff) => staff.availability === StaffAvailability.AVAILABLE,
+    ).length;
+    const onLeaveStaffCount = allStaff.filter(
+      (staff) => staff.availability === StaffAvailability.ON_LEAVE,
+    ).length;
 
     const staffLoadSummary = allStaff.map((staff) => {
       const todayCount = countsMap.get(staff.id) || 0;
@@ -129,9 +154,16 @@ export class DashboardService {
     return {
       date: startOfDay.toISOString().split('T')[0],
       totalAppointmentsToday,
-      completedCount,
-      pendingCount,
+      completedCount: completedAppointmentsToday,
+      pendingCount: pendingAppointmentsToday,
       waitingQueueCount,
+      totalStaff,
+      availableStaffCount,
+      onLeaveStaffCount,
+      totalServices,
+      totalAppointmentsAllTime,
+      completedAppointmentsAllTime,
+      latestActivityLogs,
       staffLoadSummary,
     };
   }

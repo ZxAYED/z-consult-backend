@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -40,6 +41,7 @@ export class AppointmentsController {
     @Query('page') page?: number,
     @Query('limit') limit?: number,
     @Query('date') date?: string,
+    @Query('search') search?: string,
     @Query('staffId') staffId?: string,
     @Query('status') status?: AppointmentStatus,
   ) {
@@ -47,6 +49,7 @@ export class AppointmentsController {
       page,
       limit,
       date,
+      search,
       staffId,
       status,
     );
@@ -69,5 +72,11 @@ export class AppointmentsController {
   async cancel(@Param('id') id: string) {
     const data = await this.appointmentsService.cancel(id);
     return sendResponse('Appointment cancelled successfully', data);
+  }
+
+  @Delete(':id')
+  async remove(@Param('id') id: string) {
+    const data = await this.appointmentsService.cancel(id);
+    return sendResponse('Appointment deleted successfully', data);
   }
 }

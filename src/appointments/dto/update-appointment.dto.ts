@@ -6,7 +6,6 @@ import {
   IsISO8601,
   IsOptional,
   IsString,
-  IsUUID,
   Length,
 } from 'class-validator';
 
@@ -29,12 +28,12 @@ export class UpdateAppointmentDto {
 
   @ApiPropertyOptional({ example: 'service-uuid-123' })
   @IsOptional()
-  @IsUUID()
+  @IsString()
   serviceId?: string;
 
   @ApiPropertyOptional({ example: 'staff-uuid-123', nullable: true })
   @IsOptional()
-  @IsUUID()
+  @IsString()
   staffId?: string | null;
 
   @ApiPropertyOptional({ example: '2025-02-15T10:00:00Z' })

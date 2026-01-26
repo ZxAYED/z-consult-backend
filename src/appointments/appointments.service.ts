@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import {
   AppointmentStatus,
+  LogAction,
   Prisma,
   QueueStatus,
   StaffAvailability,
@@ -50,8 +51,8 @@ export class AppointmentsService {
   }
 
   private getDayRangeUtcFromLocalDateString(dateStr: string) {
-    // dateStr expected: YYYY-MM-DD
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+    const datePart = dateStr.includes('T') ? dateStr.split('T')[0] : dateStr;
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(datePart);
     if (!m)
       throw new BadRequestException('Invalid date format. Use YYYY-MM-DD');
 
@@ -67,6 +68,20 @@ export class AppointmentsService {
       startUtc: new Date(startLocalMs - offsetMs),
       endUtc: new Date(endLocalMs - offsetMs),
     };
+  }
+
+  private formatLocalTime(date: Date) {
+    const offsetMs = this.tzOffsetMinutes * 60_000;
+    const local = new Date(date.getTime() + offsetMs);
+
+    let hours = local.getUTCHours();
+    const minutes = local.getUTCMinutes();
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12;
+    if (hours === 0) hours = 12;
+
+    const mm = minutes.toString().padStart(2, '0');
+    return `${hours}:${mm} ${ampm}`;
   }
 
   private async hasOverlapConflict(
@@ -306,6 +321,28 @@ export class AppointmentsService {
         await tx.queueItem.create({
           data: { appointmentId: appointment.id, status: QueueStatus.ACTIVE },
         });
+
+        const timeStr = this.formatLocalTime(appointment.startAt);
+        await tx.activityLog.create({
+          data: {
+            action: LogAction.QUEUE_JOINED,
+            message: `${timeStr} — Appointment for “${appointment.customerName}” added to queue.`,
+            metadata: { appointmentId: appointment.id },
+          },
+        });
+      } else if (appointmentStatus === AppointmentStatus.SCHEDULED) {
+        const timeStr = this.formatLocalTime(appointment.startAt);
+        const staffName = appointment.staff?.name ?? 'staff';
+        await tx.activityLog.create({
+          data: {
+            action: LogAction.QUEUE_ASSIGNED,
+            message: `${timeStr} — Appointment for “${appointment.customerName}” auto-assigned to ${staffName}.`,
+            metadata: {
+              appointmentId: appointment.id,
+              staffId: appointment.staffId,
+            },
+          },
+        });
       }
 
       return appointment;
@@ -316,6 +353,7 @@ export class AppointmentsService {
     page?: number,
     limit?: number,
     date?: string,
+    search?: string,
     staffId?: string,
     status?: AppointmentStatus,
   ) {
@@ -324,6 +362,24 @@ export class AppointmentsService {
     if (date) {
       const { startUtc, endUtc } = this.getDayRangeUtcFromLocalDateString(date);
       where.startAt = { gte: startUtc, lt: endUtc };
+    }
+
+    if (search && search.trim()) {
+      const term = search.trim();
+      where.OR = [
+        {
+          id: { contains: term, mode: Prisma.QueryMode.insensitive },
+        },
+        {
+          customerName: { contains: term, mode: Prisma.QueryMode.insensitive },
+        },
+        {
+          customerEmail: { contains: term, mode: Prisma.QueryMode.insensitive },
+        },
+        {
+          customerPhone: { contains: term, mode: Prisma.QueryMode.insensitive },
+        },
+      ];
     }
 
     if (staffId) where.staffId = staffId;
@@ -337,7 +393,7 @@ export class AppointmentsService {
       skip,
       take,
       include: { service: true, staff: true },
-      orderBy: { startAt: 'asc' },
+      orderBy: [{ startAt: 'desc' }, { createdAt: 'desc' }],
     });
 
     return { data, meta };
