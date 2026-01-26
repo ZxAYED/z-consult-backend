@@ -10,7 +10,12 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.use(cookieParser());
   app.enableCors({
-    origin: ['http://localhost:3000', 'http://localhost:3001', '*'],
+    origin: [
+      'https://z-consult.netlify.app',
+      'http://localhost:3000',
+      'http://localhost:3001',
+      '*',
+    ],
     credentials: true,
   });
   app.useGlobalPipes(
