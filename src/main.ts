@@ -11,10 +11,9 @@ async function bootstrap() {
   app.use(cookieParser());
   app.enableCors({
     origin: [
-      'https://z-consult.netlify.app',
+      'https://z-consult-frontend.vercel.app',
       'http://localhost:3000',
       'http://localhost:3001',
-      '*',
     ],
     credentials: true,
   });
