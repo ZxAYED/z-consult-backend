@@ -87,21 +87,25 @@ NODE_ENV	No	-	Set to production for secure refresh cookies
 API Routes
 ```
 Auth
+
 Route	Method	Role	Description
 /auth/register	POST	Public	Registers a new user
 /auth/login	POST	Public	Logs in and provides token
 /auth/refresh	POST	Public	Refreshes the auth token
 /auth/me	GET	Bearer	Fetches the current user info
+
 Appointments
 Route	Method	Role	Description
 /appointments	GET	Admin	List all appointments
 /appointments	POST	Admin	Create new appointment
 /appointments/:id	PATCH	Admin	Update existing appointment
 /appointments/:id/cancel	POST	Admin	Cancel an appointment
+
 Queue
 Route	Method	Role	Description
 /queue	GET	Admin	Get the current active queue
 /queue/assign	POST	Admin	Assign the next appointment
+
 Staff
 Route	Method	Role	Description
 /staff	GET	Admin	Get the list of staff members
