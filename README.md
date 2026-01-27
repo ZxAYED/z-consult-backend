@@ -68,6 +68,8 @@ npm run start:dev
 
 
 Environment Variables
+
+```
 Variable	Required	Default	Description
 DATABASE_URL	Yes	-	Database connection string for PostgreSQL
 JWT_SECRET	Yes	-	Base JWT secret for authentication
@@ -78,11 +80,12 @@ PORT	No	3000	API port
 SUPABASE_URL	No	-	URL for Supabase storage (if needed)
 SUPABASE_ANON_KEY	No	-	Supabase anon key (if needed)
 NODE_ENV	No	-	Set to production for secure refresh cookies
-
+```
 
 
 
 API Routes
+```
 Auth
 Route	Method	Role	Description
 /auth/register	POST	Public	Registers a new user
@@ -105,7 +108,7 @@ Route	Method	Role	Description
 /staff	POST	Admin	Add a new staff member
 
 
-
+```
 
 #Project Structure
 ```
