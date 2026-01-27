@@ -1,57 +1,47 @@
+# syntax=docker/dockerfile:1.6
+
 # Build stage
 FROM node:20-alpine AS builder
-
-# Set working directory
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+# Only copy dependency manifests first (best cache reuse)
+COPY package.json package-lock.json ./
 COPY prisma ./prisma/
 
-# Install dependencies
-RUN npm ci
+# Cache npm downloads between builds
+RUN --mount=type=cache,target=/root/.npm npm ci
 
-# Copy source code
+# Copy the rest
 COPY . .
 
-# Generate Prisma Client
+# Prisma + build
 RUN npx prisma generate
-
-# Build the application
 RUN npm run build
+
 
 # Production stage
 FROM node:20-alpine AS production
-
-# Set working directory
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+ENV NODE_ENV=production
+
+# Create non-root user (recommended)
+RUN addgroup -g 1001 -S nodejs && adduser -S nestjs -u 1001
+
+# Copy only what's needed to run
+COPY package.json package-lock.json ./
 COPY prisma ./prisma/
-
-# Install only production dependencies
-RUN npm ci --only=production
-
-# Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
 
+# (Optional) if you need runtime files like views/public, copy them too
+# COPY --from=builder /app/public ./public
 
-# Generate Prisma Client in production
-RUN npx prisma generate
+# If you MUST generate prisma at runtime, keep this, but usually not needed if node_modules copied
+# RUN npx prisma generate
 
-# Create a non-root user
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nestjs -u 1001
-
-# Change ownership of the app directory
 RUN chown -R nestjs:nodejs /app
-
-# Switch to non-root user
 USER nestjs
 
-# Expose the application port
 EXPOSE 3000
-
-# Start the application
 CMD ["node", "dist/main.js"]
