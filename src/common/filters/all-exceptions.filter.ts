@@ -24,7 +24,11 @@ function normalizeMessage(message: unknown): string | string[] {
   }
 }
 
-function mapPrismaKnownError(error: Prisma.PrismaClientKnownRequestError) {
+function mapPrismaKnownError(error: Prisma.PrismaClientKnownRequestError): {
+  statusCode: number;
+  code: string;
+  message?: string;
+} {
   switch (error.code) {
     case 'P2002':
       return { statusCode: HttpStatus.CONFLICT, code: 'DB_UNIQUE_CONSTRAINT' };
@@ -97,7 +101,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
           statusCode: mapped.statusCode,
           timestamp,
           path,
-          message: 'Database error',
+          message: mapped.message ?? 'Database error',
           code: mapped.code,
           prismaCode: exception.code,
         },
